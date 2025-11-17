@@ -1,7 +1,14 @@
+CREATE TABLE budget_history(
+  id uuid PRIMARY KEY,
+  budget_type text NOT NULL
+);
+
 CREATE TABLE campaign(
   id uuid PRIMARY KEY,
   approved_ad_set_count int NOT NULL DEFAULT 0,
-  pending_ad_set_count int NOT NULL DEFAULT 0
+  pending_ad_set_count int NOT NULL DEFAULT 0,
+  approved_ad_sets_schedule jsonb NOT NULL DEFAULT '{}'::jsonb,
+  current_budget_history_id uuid REFERENCES budget_history(id)
 );
 
 CREATE TABLE ad_set(
@@ -58,7 +65,15 @@ BEGIN
           ad_set
         WHERE
           campaign_id = v_campaign_id_old
-          AND review_status = 'PENDING')
+          AND review_status = 'PENDING'),
+      approved_ad_sets_schedule =(
+        SELECT
+          COALESCE(jsonb_object_agg(id::text, jsonb_build_array(start_date_time, end_date_time)), '{}'::jsonb)
+        FROM
+          ad_set
+        WHERE
+          campaign_id = v_campaign_id_old
+          AND review_status = 'APPROVED')
     WHERE
       id = v_campaign_id_old;
   END IF;
@@ -84,7 +99,15 @@ BEGIN
           ad_set
         WHERE
           campaign_id = v_campaign_id_new
-          AND review_status = 'PENDING')
+          AND review_status = 'PENDING'),
+      approved_ad_sets_schedule =(
+        SELECT
+          COALESCE(jsonb_object_agg(id::text, jsonb_build_array(start_date_time, end_date_time)), '{}'::jsonb)
+        FROM
+          ad_set
+        WHERE
+          campaign_id = v_campaign_id_new
+          AND review_status = 'APPROVED')
     WHERE
       id = v_campaign_id_new;
   END IF;
@@ -107,7 +130,10 @@ CREATE TRIGGER trg_ad_set_count_update
 INSERT INTO campaign(id)
   VALUES ('550e8400-e29b-41d4-a716-446655440000');
 
--- Insert 3 ad sets for the campaign
+-- Insert a sample budget history record
+INSERT INTO budget_history(id, budget_type)
+  VALUES ('750e8400-e29b-41d4-a716-446655440000', 'DAILY');
+
 -- Insert 3 ad sets for the campaign
 INSERT INTO ad_set(id, campaign_id, review_status, start_date_time, end_date_time)
 VALUES
