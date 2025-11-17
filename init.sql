@@ -7,8 +7,8 @@ CREATE TABLE campaign(
   id uuid PRIMARY KEY,
   approved_ad_set_count int NOT NULL DEFAULT 0,
   pending_ad_set_count int NOT NULL DEFAULT 0,
-  active_ad_set_start_end_date_times jsonb NOT NULL DEFAULT '{}'::jsonb,
-  current_budget_history_id uuid REFERENCES budget_history(id)
+  active_ad_set_start_end_date_times jsonb NOT NULL DEFAULT '[]'::jsonb,
+  all_ad_set_end_date_times jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
 CREATE TABLE ad_set(
@@ -16,7 +16,8 @@ CREATE TABLE ad_set(
   campaign_id uuid NOT NULL REFERENCES campaign(id),
   review_status text NOT NULL,
   start_date_time timestamp without time zone NOT NULL,
-  end_date_time timestamp without time zone
+  end_date_time timestamp without time zone,
+  current_budget_history_id uuid REFERENCES budget_history(id)
 );
 
 CREATE FUNCTION update_campaign_ad_set_counts()
@@ -81,12 +82,20 @@ BEGIN
           AND review_status = 'PENDING'),
       active_ad_set_start_end_date_times =(
         SELECT
-          COALESCE(jsonb_object_agg(id::text, jsonb_build_array(start_date_time, end_date_time)), '{}'::jsonb)
+          COALESCE(jsonb_agg(jsonb_build_array(start_date_time, end_date_time)), '[]'::jsonb)
         FROM
           ad_set
         WHERE
           campaign_id = v_campaign_id
-          AND review_status IN ('READY', 'APPROVED'))
+          AND review_status IN ('READY', 'APPROVED')),
+      all_ad_set_end_date_times =(
+        SELECT
+          COALESCE(jsonb_agg(end_date_time), '[]'::jsonb)
+        FROM
+          ad_set
+        WHERE
+          campaign_id = v_campaign_id
+          AND review_status <> 'ARCHIVED')
     WHERE
       id = v_campaign_id;
   END LOOP;
@@ -114,11 +123,11 @@ INSERT INTO budget_history(id, budget_type)
   VALUES ('750e8400-e29b-41d4-a716-446655440000', 'DAILY');
 
 -- Insert 3 ad sets for the campaign
-INSERT INTO ad_set(id, campaign_id, review_status, start_date_time, end_date_time)
+INSERT INTO ad_set(id, campaign_id, review_status, start_date_time, end_date_time, current_budget_history_id)
 VALUES
-  ('650e8400-e29b-41d4-a716-446655440001', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-01-01 00:00:00', '2024-12-31 23:59:59'),
-('650e8400-e29b-41d4-a716-446655440002', '550e8400-e29b-41d4-a716-446655440000', 'PENDING', '2024-01-15 00:00:00', NULL),
-('650e8400-e29b-41d4-a716-446655440003', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-02-01 00:00:00', '2024-11-30 23:59:59');
+  ('650e8400-e29b-41d4-a716-446655440001', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-01-01 00:00:00', '2024-12-31 23:59:59', NULL),
+('650e8400-e29b-41d4-a716-446655440002', '550e8400-e29b-41d4-a716-446655440000', 'PENDING', '2024-01-15 00:00:00', NULL, '750e8400-e29b-41d4-a716-446655440000'),
+('650e8400-e29b-41d4-a716-446655440003', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-02-01 00:00:00', '2024-11-30 23:59:59', NULL);
 
 SELECT
   *
