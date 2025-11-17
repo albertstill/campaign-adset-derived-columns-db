@@ -82,22 +82,32 @@ BEGIN
           AND review_status = 'PENDING'),
       active_ad_set_start_end_date_times =(
         SELECT
-          COALESCE(jsonb_agg(jsonb_build_array(start_date_time, end_date_time)), '[]'::jsonb)
+          COALESCE(jsonb_agg(jsonb_build_array(start_date_time, CASE WHEN budget_history.budget_type = 'DAILY' THEN
+                  NULL
+                ELSE
+                  end_date_time
+                END)), '[]'::jsonb)
         FROM
           ad_set
-        WHERE
-          campaign_id = v_campaign_id
-          AND review_status IN ('READY', 'APPROVED')),
-      all_ad_set_end_date_times =(
-        SELECT
-          COALESCE(jsonb_agg(end_date_time), '[]'::jsonb)
-        FROM
-          ad_set
-        WHERE
-          campaign_id = v_campaign_id
-          AND review_status <> 'ARCHIVED')
-    WHERE
-      id = v_campaign_id;
+        LEFT JOIN budget_history ON ad_set.current_budget_history_id = budget_history.id
+      WHERE
+        start_date_time IS NOT NULL
+        AND ((end_date_time IS NOT NULL)
+          OR (end_date_time IS NULL
+            AND budget_history.budget_type = 'DAILY'))
+        AND campaign_id = v_campaign_id
+        AND review_status IN ('READY', 'APPROVED')),
+    all_ad_set_end_date_times =(
+      SELECT
+        COALESCE(jsonb_agg(end_date_time), '[]'::jsonb)
+      FROM
+        ad_set
+      WHERE
+        campaign_id = v_campaign_id
+        AND end_date_time IS NOT NULL
+        AND review_status <> 'ARCHIVED')
+  WHERE
+    id = v_campaign_id;
   END LOOP;
   -- Return the appropriate record
   IF (TG_OP = 'DELETE') THEN
@@ -126,8 +136,9 @@ INSERT INTO budget_history(id, budget_type)
 INSERT INTO ad_set(id, campaign_id, review_status, start_date_time, end_date_time, current_budget_history_id)
 VALUES
   ('650e8400-e29b-41d4-a716-446655440001', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-01-01 00:00:00', '2024-12-31 23:59:59', NULL),
-('650e8400-e29b-41d4-a716-446655440002', '550e8400-e29b-41d4-a716-446655440000', 'PENDING', '2024-01-15 00:00:00', NULL, '750e8400-e29b-41d4-a716-446655440000'),
-('650e8400-e29b-41d4-a716-446655440003', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-02-01 00:00:00', '2024-11-30 23:59:59', NULL);
+('650e8400-e29b-41d4-a716-446655440003', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-02-01 00:00:00', '2024-11-30 23:59:59', NULL),
+('650e8400-e29b-41d4-a716-446655440002', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-01-15 00:00:00', NULL, '750e8400-e29b-41d4-a716-446655440000'),
+('650e8400-e29b-41d4-a716-446655440004', '550e8400-e29b-41d4-a716-446655440000', 'PENDING', '2024-03-01 00:00:00', NULL, NULL);
 
 SELECT
   *
