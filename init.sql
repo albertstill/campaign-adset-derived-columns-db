@@ -5,10 +5,11 @@ CREATE TABLE budget_history(
 
 CREATE TABLE campaign(
   id uuid PRIMARY KEY,
-  approved_ad_set_count int NOT NULL DEFAULT 0,
-  pending_ad_set_count int NOT NULL DEFAULT 0,
-  active_ad_set_start_end_date_times jsonb NOT NULL DEFAULT '[]'::jsonb,
-  all_ad_set_end_date_times jsonb NOT NULL DEFAULT '{}'::jsonb
+  ad_sets_approved_count int NOT NULL DEFAULT 0,
+  ad_sets_pending_count int NOT NULL DEFAULT 0,
+  ad_sets_active_start_end_date_times jsonb NOT NULL DEFAULT '[]'::jsonb,
+  ad_sets_all_end_date_times jsonb NOT NULL DEFAULT '{}'::jsonb,
+  ad_sets_is_paused_count int NOT NULL DEFAULT 0
 );
 
 CREATE TABLE ad_set(
@@ -17,7 +18,8 @@ CREATE TABLE ad_set(
   review_status text NOT NULL,
   start_date_time timestamp without time zone NOT NULL,
   end_date_time timestamp without time zone,
-  current_budget_history_id uuid REFERENCES budget_history(id)
+  current_budget_history_id uuid REFERENCES budget_history(id),
+  is_paused boolean NOT NULL DEFAULT FALSE
 );
 
 CREATE FUNCTION update_campaign_ad_set_counts()
@@ -64,7 +66,7 @@ BEGIN
     UPDATE
       campaign
     SET
-      approved_ad_set_count =(
+      ad_sets_approved_count =(
         SELECT
           COUNT(*)
         FROM
@@ -72,7 +74,7 @@ BEGIN
         WHERE
           campaign_id = v_campaign_id
           AND review_status = 'APPROVED'),
-      pending_ad_set_count =(
+      ad_sets_pending_count =(
         SELECT
           COUNT(*)
         FROM
@@ -80,7 +82,7 @@ BEGIN
         WHERE
           campaign_id = v_campaign_id
           AND review_status = 'PENDING'),
-      active_ad_set_start_end_date_times =(
+      ad_sets_active_start_end_date_times =(
         SELECT
           COALESCE(jsonb_agg(jsonb_build_array(start_date_time, CASE WHEN budget_history.budget_type = 'DAILY' THEN
                   NULL
@@ -97,7 +99,7 @@ BEGIN
             AND budget_history.budget_type = 'DAILY'))
         AND campaign_id = v_campaign_id
         AND review_status IN ('READY', 'APPROVED')),
-    all_ad_set_end_date_times =(
+    ad_sets_all_end_date_times =(
       SELECT
         COALESCE(jsonb_agg(end_date_time), '[]'::jsonb)
       FROM
@@ -105,7 +107,15 @@ BEGIN
       WHERE
         campaign_id = v_campaign_id
         AND end_date_time IS NOT NULL
-        AND review_status <> 'ARCHIVED')
+        AND review_status <> 'ARCHIVED'),
+    ad_sets_is_paused_count =(
+      SELECT
+        COUNT(*)
+      FROM
+        ad_set
+      WHERE
+        campaign_id = v_campaign_id
+        AND is_paused = TRUE)
   WHERE
     id = v_campaign_id;
   END LOOP;
@@ -133,12 +143,12 @@ INSERT INTO budget_history(id, budget_type)
   VALUES ('750e8400-e29b-41d4-a716-446655440000', 'DAILY');
 
 -- Insert 3 ad sets for the campaign
-INSERT INTO ad_set(id, campaign_id, review_status, start_date_time, end_date_time, current_budget_history_id)
+INSERT INTO ad_set(id, campaign_id, review_status, start_date_time, end_date_time, current_budget_history_id, is_paused)
 VALUES
-  ('650e8400-e29b-41d4-a716-446655440001', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-01-01 00:00:00', '2024-12-31 23:59:59', NULL),
-('650e8400-e29b-41d4-a716-446655440003', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-02-01 00:00:00', '2024-11-30 23:59:59', NULL),
-('650e8400-e29b-41d4-a716-446655440002', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-01-15 00:00:00', NULL, '750e8400-e29b-41d4-a716-446655440000'),
-('650e8400-e29b-41d4-a716-446655440004', '550e8400-e29b-41d4-a716-446655440000', 'PENDING', '2024-03-01 00:00:00', NULL, NULL);
+  ('650e8400-e29b-41d4-a716-446655440001', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-01-01 00:00:00', '2024-12-31 23:59:59', NULL, FALSE),
+('650e8400-e29b-41d4-a716-446655440003', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-02-01 00:00:00', '2024-11-30 23:59:59', NULL, TRUE),
+('650e8400-e29b-41d4-a716-446655440002', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-01-15 00:00:00', NULL, '750e8400-e29b-41d4-a716-446655440000', FALSE),
+('650e8400-e29b-41d4-a716-446655440004', '550e8400-e29b-41d4-a716-446655440000', 'PENDING', '2024-03-01 00:00:00', NULL, NULL, FALSE);
 
 SELECT
   *
