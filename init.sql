@@ -7,7 +7,7 @@ CREATE TABLE campaign(
   id uuid PRIMARY KEY,
   approved_ad_set_count int NOT NULL DEFAULT 0,
   pending_ad_set_count int NOT NULL DEFAULT 0,
-  approved_ad_sets_schedule jsonb NOT NULL DEFAULT '{}'::jsonb,
+  active_ad_set_start_end_date_times jsonb NOT NULL DEFAULT '{}'::jsonb,
   current_budget_history_id uuid REFERENCES budget_history(id)
 );
 
@@ -25,6 +25,7 @@ CREATE FUNCTION update_campaign_ad_set_counts()
 DECLARE
   v_campaign_id_old uuid;
   v_campaign_id_new uuid;
+  v_campaign_id uuid;
 BEGIN
   -- Determine which campaign(s) are affected
   IF (TG_OP = 'DELETE') THEN
@@ -35,7 +36,7 @@ BEGIN
     v_campaign_id_new := NEW.campaign_id;
   ELSIF (TG_OP = 'UPDATE') THEN
     -- On UPDATE, check if the status or campaign link changed
-    IF OLD.review_status = NEW.review_status AND OLD.campaign_id = NEW.campaign_id THEN
+    IF OLD.review_status = NEW.review_status AND OLD.campaign_id = NEW.campaign_id AND OLD.current_budget_history_id = NEW.current_budget_history_id THEN
       -- Nothing we care about changed, so exit
       RETURN NEW;
     END IF;
@@ -46,7 +47,19 @@ BEGIN
   END IF;
   -- Recalculate counts for the OLD campaign_id
   -- (This runs on DELETE or if campaign_id changed on UPDATE)
-  IF v_campaign_id_old IS NOT NULL THEN
+  -- Collect affected campaign IDs
+  FOR v_campaign_id IN SELECT DISTINCT
+    campaign_id_val
+  FROM (
+    SELECT
+      v_campaign_id_old AS campaign_id_val
+    WHERE
+      v_campaign_id_old IS NOT NULL
+    UNION
+    SELECT
+      v_campaign_id_new AS campaign_id_val
+    WHERE
+      v_campaign_id_new IS NOT NULL) AS affected_campaigns LOOP
     UPDATE
       campaign
     SET
@@ -56,7 +69,7 @@ BEGIN
         FROM
           ad_set
         WHERE
-          campaign_id = v_campaign_id_old
+          campaign_id = v_campaign_id
           AND review_status = 'APPROVED'),
       pending_ad_set_count =(
         SELECT
@@ -64,53 +77,19 @@ BEGIN
         FROM
           ad_set
         WHERE
-          campaign_id = v_campaign_id_old
+          campaign_id = v_campaign_id
           AND review_status = 'PENDING'),
-      approved_ad_sets_schedule =(
+      active_ad_set_start_end_date_times =(
         SELECT
           COALESCE(jsonb_object_agg(id::text, jsonb_build_array(start_date_time, end_date_time)), '{}'::jsonb)
         FROM
           ad_set
         WHERE
-          campaign_id = v_campaign_id_old
-          AND review_status = 'APPROVED')
+          campaign_id = v_campaign_id
+          AND review_status IN ('READY', 'APPROVED'))
     WHERE
-      id = v_campaign_id_old;
-  END IF;
-  -- Recalculate counts for the NEW campaign_id
-  -- (This runs on INSERT or if campaign_id changed on UPDATE)
-  -- We check if it's different from the old one to avoid updating the same row twice
-  IF v_campaign_id_new IS NOT NULL AND (v_campaign_id_old IS NULL OR v_campaign_id_new <> v_campaign_id_old) THEN
-    UPDATE
-      campaign
-    SET
-      approved_ad_set_count =(
-        SELECT
-          COUNT(*)
-        FROM
-          ad_set
-        WHERE
-          campaign_id = v_campaign_id_new
-          AND review_status = 'APPROVED'),
-      pending_ad_set_count =(
-        SELECT
-          COUNT(*)
-        FROM
-          ad_set
-        WHERE
-          campaign_id = v_campaign_id_new
-          AND review_status = 'PENDING'),
-      approved_ad_sets_schedule =(
-        SELECT
-          COALESCE(jsonb_object_agg(id::text, jsonb_build_array(start_date_time, end_date_time)), '{}'::jsonb)
-        FROM
-          ad_set
-        WHERE
-          campaign_id = v_campaign_id_new
-          AND review_status = 'APPROVED')
-    WHERE
-      id = v_campaign_id_new;
-  END IF;
+      id = v_campaign_id;
+  END LOOP;
   -- Return the appropriate record
   IF (TG_OP = 'DELETE') THEN
     RETURN OLD;
