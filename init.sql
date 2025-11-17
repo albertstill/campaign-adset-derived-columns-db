@@ -5,8 +5,11 @@ CREATE TABLE budget_history(
 
 CREATE TABLE campaign(
   id uuid PRIMARY KEY,
+  name text NOT NULL,
+  ad_sets_total_count int NOT NULL DEFAULT 0,
   ad_sets_approved_count int NOT NULL DEFAULT 0,
-  ad_sets_pending_count int NOT NULL DEFAULT 0,
+  ad_sets_pending_approval_count int NOT NULL DEFAULT 0,
+  ad_sets_completed_count int NOT NULL DEFAULT 0,
   ad_sets_active_start_end_date_times jsonb NOT NULL DEFAULT '[]'::jsonb,
   ad_sets_all_end_date_times jsonb NOT NULL DEFAULT '{}'::jsonb,
   ad_sets_is_paused_count int NOT NULL DEFAULT 0
@@ -22,7 +25,7 @@ CREATE TABLE ad_set(
   is_paused boolean NOT NULL DEFAULT FALSE
 );
 
-CREATE FUNCTION update_campaign_ad_set_counts()
+CREATE FUNCTION update_campaign_ad_set_columns()
   RETURNS TRIGGER
   AS $$
 DECLARE
@@ -66,7 +69,13 @@ BEGIN
     UPDATE
       campaign
     SET
-      ad_sets_approved_count =(
+      ad_sets_total_count =(
+        SELECT
+          COUNT(*)
+        FROM
+          ad_set
+        WHERE
+          campaign_id = v_campaign_id), ad_sets_approved_count =(
         SELECT
           COUNT(*)
         FROM
@@ -74,14 +83,22 @@ BEGIN
         WHERE
           campaign_id = v_campaign_id
           AND review_status = 'APPROVED'),
-      ad_sets_pending_count =(
+      ad_sets_pending_approval_count =(
         SELECT
           COUNT(*)
         FROM
           ad_set
         WHERE
           campaign_id = v_campaign_id
-          AND review_status = 'PENDING'),
+          AND review_status = 'PENDING_APPROVAL'),
+      ad_sets_completed_count =(
+        SELECT
+          COUNT(*)
+        FROM
+          ad_set
+        WHERE
+          campaign_id = v_campaign_id
+          AND review_status = 'COMPLETED'),
       ad_sets_active_start_end_date_times =(
         SELECT
           COALESCE(jsonb_agg(jsonb_build_array(start_date_time, CASE WHEN budget_history.budget_type = 'DAILY' THEN
@@ -132,11 +149,15 @@ LANGUAGE plpgsql;
 CREATE TRIGGER trg_ad_set_count_update
   AFTER INSERT OR UPDATE OR DELETE ON ad_set
   FOR EACH ROW
-  EXECUTE FUNCTION update_campaign_ad_set_counts();
+  EXECUTE FUNCTION update_campaign_ad_set_columns();
 
 -- Insert a sample campaign
-INSERT INTO campaign(id)
-  VALUES ('550e8400-e29b-41d4-a716-446655440000');
+INSERT INTO campaign(name, id)
+VALUES
+  ('Active Campaign - Live dates', '550e8400-e29b-41d4-a716-446655440003'),
+('Active Campaign - Budget History', '550e8400-e29b-41d4-a716-446655440000'),
+('Pending Approval Campaign', '550e8400-e29b-41d4-a716-446655440009'),
+('Completed Campaign', '750e8400-e29b-41d4-a716-446655440001');
 
 -- Insert a sample budget history record
 INSERT INTO budget_history(id, budget_type)
@@ -145,13 +166,108 @@ INSERT INTO budget_history(id, budget_type)
 -- Insert 3 ad sets for the campaign
 INSERT INTO ad_set(id, campaign_id, review_status, start_date_time, end_date_time, current_budget_history_id, is_paused)
 VALUES
-  ('650e8400-e29b-41d4-a716-446655440001', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-01-01 00:00:00', '2024-12-31 23:59:59', NULL, FALSE),
-('650e8400-e29b-41d4-a716-446655440003', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-02-01 00:00:00', '2024-11-30 23:59:59', NULL, TRUE),
+  --
+('650e8400-e29b-41d4-a716-446655440001', '550e8400-e29b-41d4-a716-446655440003', 'APPROVED', '2025-01-01 00:00:00', '2025-12-31 23:59:59', NULL, FALSE),
+('650e8400-e29b-41d4-a716-446655440003', '550e8400-e29b-41d4-a716-446655440003', 'APPROVED', '2025-02-01 00:00:00', '2025-12-30 23:59:59', NULL, TRUE),
+  --
 ('650e8400-e29b-41d4-a716-446655440002', '550e8400-e29b-41d4-a716-446655440000', 'APPROVED', '2024-01-15 00:00:00', NULL, '750e8400-e29b-41d4-a716-446655440000', FALSE),
-('650e8400-e29b-41d4-a716-446655440004', '550e8400-e29b-41d4-a716-446655440000', 'PENDING', '2024-03-01 00:00:00', NULL, NULL, FALSE);
+  --
+('650e8400-e29b-41d4-a716-446655440004', '550e8400-e29b-41d4-a716-446655440009', 'PENDING_APPROVAL', '2024-03-01 00:00:00', '2025-12-30 23:59:59', NULL, FALSE),
+  --
+('650e8400-e29b-41d4-a716-446655440005', '750e8400-e29b-41d4-a716-446655440001', 'COMPLETED', '2024-03-01 00:00:00', '2024-05-01 00:00:00', NULL, FALSE);
+
+-- Helper function to count how many ad sets are currently active
+CREATE FUNCTION count_active_ad_sets(ad_sets_active_start_end_date_times jsonb)
+  RETURNS integer
+  AS $$
+DECLARE
+  date_range jsonb;
+  start_time timestamp without time zone;
+  end_time timestamp without time zone;
+  current_timestamp_val timestamp without time zone;
+  active_count integer := 0;
+BEGIN
+  current_timestamp_val := now();
+  -- Iterate through each [start, end] tuple in the jsonb array
+  FOR date_range IN
+  SELECT
+    jsonb_array_elements(ad_sets_active_start_end_date_times)
+    LOOP
+      start_time :=(date_range ->> 0)::timestamp WITHOUT time zone;
+      end_time :=(date_range ->> 1)::timestamp WITHOUT time zone;
+      -- Check if current time is within the range
+      IF current_timestamp_val >= start_time AND (end_time IS NULL OR current_timestamp_val <= end_time) THEN
+        active_count := active_count + 1;
+      END IF;
+    END LOOP;
+  RETURN active_count;
+END;
+$$
+LANGUAGE plpgsql;
+
+CREATE FUNCTION all_end_dates_before_now(ad_sets_all_end_date_times jsonb)
+  RETURNS boolean
+  AS $$
+DECLARE
+  end_date_time timestamp without time zone;
+  current_timestamp_val timestamp without time zone;
+BEGIN
+  current_timestamp_val := now();
+  -- If the array is empty, return false
+  IF jsonb_array_length(ad_sets_all_end_date_times) = 0 THEN
+    RETURN FALSE;
+  END IF;
+  -- Iterate through each end_date_time in the jsonb array
+  FOR end_date_time IN
+  SELECT
+    (jsonb_array_elements(ad_sets_all_end_date_times) #>> '{}')::timestamp WITHOUT time zone LOOP
+      -- If any date is not before now, return false
+      IF end_date_time >= current_timestamp_val THEN
+        RETURN FALSE;
+      END IF;
+    END LOOP;
+  -- All dates are before now
+  RETURN TRUE;
+END;
+$$
+LANGUAGE plpgsql;
+
+CREATE FUNCTION has_one_distinct_ad_set_status(p_ad_sets_approved_count int, p_ad_sets_pending_approval_count int, p_ad_sets_completed_count int)
+  RETURNS boolean
+  AS $$
+BEGIN
+  RETURN(
+    CASE WHEN p_ad_sets_approved_count > 0 THEN
+      1
+    ELSE
+      0
+    END + CASE WHEN p_ad_sets_pending_approval_count > 0 THEN
+      1
+    ELSE
+      0
+    END + CASE WHEN p_ad_sets_completed_count > 0 THEN
+      1
+    ELSE
+      0
+    END) = 1;
+END;
+$$
+LANGUAGE plpgsql;
 
 SELECT
-  *
+  *,
+  CASE WHEN ad_sets_total_count = 0 THEN
+    'PENDING_APPROVAL'
+  WHEN count_active_ad_sets(ad_sets_active_start_end_date_times) > 0 THEN
+    'ACTIVE'
+  WHEN has_one_distinct_ad_set_status(ad_sets_approved_count, ad_sets_pending_approval_count, ad_sets_completed_count) = TRUE
+    AND all_end_dates_before_now(ad_sets_all_end_date_times) THEN
+    'COMPLETED'
+  WHEN ad_sets_pending_approval_count > 0 THEN
+    'PENDING_APPROVAL'
+  ELSE
+    'UNKNOWN'
+  END AS derived_status
 FROM
   campaign;
 
