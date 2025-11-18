@@ -67,72 +67,41 @@ BEGIN
     WHERE
       v_campaign_id_new IS NOT NULL) AS affected_campaigns LOOP
     UPDATE
-      campaign
+      campaign c
     SET
-      ad_sets_total_count =(
-        SELECT
-          COUNT(*)
-        FROM
-          ad_set
-        WHERE
-          campaign_id = v_campaign_id), ad_sets_approved_count =(
-        SELECT
-          COUNT(*)
-        FROM
-          ad_set
-        WHERE
-          campaign_id = v_campaign_id
-          AND review_status = 'APPROVED'),
-      ad_sets_pending_approval_count =(
-        SELECT
-          COUNT(*)
-        FROM
-          ad_set
-        WHERE
-          campaign_id = v_campaign_id
-          AND review_status = 'PENDING_APPROVAL'),
-      ad_sets_completed_count =(
-        SELECT
-          COUNT(*)
-        FROM
-          ad_set
-        WHERE
-          campaign_id = v_campaign_id
-          AND review_status = 'COMPLETED'),
-      ad_sets_active_start_end_date_times =(
-        SELECT
-          COALESCE(jsonb_agg(jsonb_build_array(start_date_time, CASE WHEN budget_history.budget_type = 'DAILY' THEN
-                  NULL
-                ELSE
-                  end_date_time
-                END)), '[]'::jsonb)
-        FROM
-          ad_set
-        LEFT JOIN budget_history ON ad_set.current_budget_history_id = budget_history.id
-      WHERE
-        start_date_time IS NOT NULL
-        AND ((end_date_time IS NOT NULL)
-          OR (end_date_time IS NULL
-            AND budget_history.budget_type = 'DAILY'))
-        AND campaign_id = v_campaign_id
-        AND review_status IN ('READY', 'APPROVED')),
-    ad_sets_all_end_date_times =(
+      ad_sets_total_count = agg.total_count,
+      ad_sets_approved_count = agg.approved_count,
+      ad_sets_pending_approval_count = agg.pending_approval_count,
+      ad_sets_completed_count = agg.completed_count,
+      ad_sets_active_start_end_date_times = agg.active_start_end_date_times,
+      ad_sets_all_end_date_times = agg.all_end_date_times,
+      ad_sets_is_paused_count = agg.is_paused_count
+    FROM (
       SELECT
-        COALESCE(jsonb_agg(end_date_time), '[]'::jsonb)
+        a.campaign_id,
+        COUNT(*) AS total_count,
+        COUNT(*) FILTER (WHERE a.review_status = 'APPROVED') AS approved_count,
+        COUNT(*) FILTER (WHERE a.review_status = 'PENDING_APPROVAL') AS pending_approval_count,
+        COUNT(*) FILTER (WHERE a.review_status = 'COMPLETED') AS completed_count,
+        COALESCE(jsonb_agg(jsonb_build_array(a.start_date_time, CASE WHEN bh.budget_type = 'DAILY' THEN
+                NULL
+              ELSE
+                a.end_date_time
+              END)) FILTER (WHERE a.start_date_time IS NOT NULL
+            AND ((a.end_date_time IS NOT NULL)
+          OR (a.end_date_time IS NULL
+          AND bh.budget_type = 'DAILY'))
+      AND a.review_status IN ('READY', 'APPROVED')), '[]'::jsonb) AS active_start_end_date_times,
+        COALESCE(jsonb_agg(a.end_date_time) FILTER (WHERE a.end_date_time IS NOT NULL
+            AND a.review_status <> 'ARCHIVED'), '[]'::jsonb) AS all_end_date_times,
+        COUNT(*) FILTER (WHERE a.is_paused = TRUE) AS is_paused_count
       FROM
-        ad_set
-      WHERE
-        campaign_id = v_campaign_id
-        AND end_date_time IS NOT NULL
-        AND review_status <> 'ARCHIVED'),
-    ad_sets_is_paused_count =(
-      SELECT
-        COUNT(*)
-      FROM
-        ad_set
-      WHERE
-        campaign_id = v_campaign_id
-        AND is_paused = TRUE)
+        ad_set a
+      LEFT JOIN budget_history bh ON a.current_budget_history_id = bh.id
+    WHERE
+      a.campaign_id = v_campaign_id
+    GROUP BY
+      a.campaign_id) agg
   WHERE
     id = v_campaign_id;
   END LOOP;
@@ -254,20 +223,29 @@ END;
 $$
 LANGUAGE plpgsql;
 
-SELECT
-  *,
-  CASE WHEN ad_sets_total_count = 0 THEN
+CREATE FUNCTION get_campaign_status(p_ad_sets_total_count int, p_ad_sets_approved_count int, p_ad_sets_pending_approval_count int, p_ad_sets_completed_count int, p_ad_sets_active_start_end_date_times jsonb, p_ad_sets_all_end_date_times jsonb)
+  RETURNS text
+  AS $$
+BEGIN
+  RETURN CASE WHEN p_ad_sets_total_count = 0 THEN
     'PENDING_APPROVAL'
-  WHEN count_active_ad_sets(ad_sets_active_start_end_date_times) > 0 THEN
+  WHEN count_active_ad_sets(p_ad_sets_active_start_end_date_times) > 0 THEN
     'ACTIVE'
-  WHEN has_one_distinct_ad_set_status(ad_sets_approved_count, ad_sets_pending_approval_count, ad_sets_completed_count) = TRUE
-    AND all_end_dates_before_now(ad_sets_all_end_date_times) THEN
+  WHEN has_one_distinct_ad_set_status(p_ad_sets_approved_count, p_ad_sets_pending_approval_count, p_ad_sets_completed_count) = TRUE
+    AND all_end_dates_before_now(p_ad_sets_all_end_date_times) THEN
     'COMPLETED'
-  WHEN ad_sets_pending_approval_count > 0 THEN
+  WHEN p_ad_sets_pending_approval_count > 0 THEN
     'PENDING_APPROVAL'
   ELSE
     'UNKNOWN'
-  END AS derived_status
+  END;
+END;
+$$
+LANGUAGE plpgsql;
+
+SELECT
+  *,
+  get_campaign_status(ad_sets_total_count, ad_sets_approved_count, ad_sets_pending_approval_count, ad_sets_completed_count, ad_sets_active_start_end_date_times, ad_sets_all_end_date_times) AS derived_status
 FROM
   campaign;
 
