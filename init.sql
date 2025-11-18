@@ -6,12 +6,13 @@ CREATE TABLE budget_history(
 CREATE TABLE campaign(
   id uuid PRIMARY KEY,
   name text NOT NULL,
+  -- the aggregated ad set columns
   ad_sets_total_count int NOT NULL DEFAULT 0,
   ad_sets_approved_count int NOT NULL DEFAULT 0,
   ad_sets_pending_approval_count int NOT NULL DEFAULT 0,
   ad_sets_completed_count int NOT NULL DEFAULT 0,
-  ad_sets_active_start_end_date_times jsonb NOT NULL DEFAULT '[]'::jsonb,
-  ad_sets_all_end_date_times jsonb NOT NULL DEFAULT '{}'::jsonb,
+  ad_sets_active_start_end_ranges tsrange[] NOT NULL DEFAULT ARRAY[]::tsrange[],
+  ad_sets_all_end_date_times timestamp without time zone[] NOT NULL DEFAULT ARRAY[]::timestamp without time zone[],
   ad_sets_is_paused_count int NOT NULL DEFAULT 0
 );
 
@@ -73,7 +74,7 @@ BEGIN
       ad_sets_approved_count = agg.approved_count,
       ad_sets_pending_approval_count = agg.pending_approval_count,
       ad_sets_completed_count = agg.completed_count,
-      ad_sets_active_start_end_date_times = agg.active_start_end_date_times,
+      ad_sets_active_start_end_ranges = agg.active_start_end_date_times,
       ad_sets_all_end_date_times = agg.all_end_date_times,
       ad_sets_is_paused_count = agg.is_paused_count
     FROM (
@@ -83,17 +84,15 @@ BEGIN
         COUNT(*) FILTER (WHERE a.review_status = 'APPROVED') AS approved_count,
         COUNT(*) FILTER (WHERE a.review_status = 'PENDING_APPROVAL') AS pending_approval_count,
         COUNT(*) FILTER (WHERE a.review_status = 'COMPLETED') AS completed_count,
-        COALESCE(jsonb_agg(jsonb_build_array(a.start_date_time, CASE WHEN bh.budget_type = 'DAILY' THEN
-                NULL
-              ELSE
-                a.end_date_time
-              END)) FILTER (WHERE a.start_date_time IS NOT NULL
+        -- used for ACTIVE status calculation
+        COALESCE(array_agg(tsrange(a.start_date_time, a.end_date_time, '()')) FILTER (WHERE a.start_date_time IS NOT NULL
             AND ((a.end_date_time IS NOT NULL)
           OR (a.end_date_time IS NULL
           AND bh.budget_type = 'DAILY'))
-      AND a.review_status IN ('READY', 'APPROVED')), '[]'::jsonb) AS active_start_end_date_times,
-        COALESCE(jsonb_agg(a.end_date_time) FILTER (WHERE a.end_date_time IS NOT NULL
-            AND a.review_status <> 'ARCHIVED'), '[]'::jsonb) AS all_end_date_times,
+      AND a.review_status IN ('READY', 'APPROVED')), ARRAY[]::tsrange[]) AS active_start_end_date_times,
+        -- used for COMPLETED status calculation
+        COALESCE(array_agg(a.end_date_time) FILTER (WHERE a.end_date_time IS NOT NULL
+            AND a.review_status <> 'ARCHIVED'), ARRAY[]::timestamp WITHOUT time zone[]) AS all_end_date_times,
         COUNT(*) FILTER (WHERE a.is_paused = TRUE) AS is_paused_count
       FROM
         ad_set a
@@ -146,35 +145,28 @@ VALUES
 ('650e8400-e29b-41d4-a716-446655440005', '750e8400-e29b-41d4-a716-446655440001', 'COMPLETED', '2024-03-01 00:00:00', '2024-05-01 00:00:00', NULL, FALSE);
 
 -- Helper function to count how many ad sets are currently active
-CREATE FUNCTION count_active_ad_sets(ad_sets_active_start_end_date_times jsonb)
+CREATE FUNCTION count_active_ad_sets(ad_sets_active_start_end_ranges tsrange[])
   RETURNS integer
   AS $$
 DECLARE
-  date_range jsonb;
-  start_time timestamp without time zone;
-  end_time timestamp without time zone;
+  date_range tsrange;
   current_timestamp_val timestamp without time zone;
   active_count integer := 0;
 BEGIN
   current_timestamp_val := now();
-  -- Iterate through each [start, end] tuple in the jsonb array
-  FOR date_range IN
-  SELECT
-    jsonb_array_elements(ad_sets_active_start_end_date_times)
-    LOOP
-      start_time :=(date_range ->> 0)::timestamp WITHOUT time zone;
-      end_time :=(date_range ->> 1)::timestamp WITHOUT time zone;
-      -- Check if current time is within the range
-      IF current_timestamp_val >= start_time AND (end_time IS NULL OR current_timestamp_val <= end_time) THEN
-        active_count := active_count + 1;
-      END IF;
-    END LOOP;
+  -- Iterate through each tsrange in the array
+  FOREACH date_range IN ARRAY ad_sets_active_start_end_ranges LOOP
+    -- Check if current time is within the range using the @> operator
+    IF date_range @> current_timestamp_val THEN
+      active_count := active_count + 1;
+    END IF;
+  END LOOP;
   RETURN active_count;
 END;
 $$
 LANGUAGE plpgsql;
 
-CREATE FUNCTION all_end_dates_before_now(ad_sets_all_end_date_times jsonb)
+CREATE FUNCTION all_end_dates_before_now(ad_sets_all_end_date_times timestamp without time zone[])
   RETURNS boolean
   AS $$
 DECLARE
@@ -183,19 +175,17 @@ DECLARE
 BEGIN
   current_timestamp_val := now();
   -- If the array is empty, return false
-  IF jsonb_array_length(ad_sets_all_end_date_times) = 0 THEN
+  IF array_length(ad_sets_all_end_date_times, 1) IS NULL THEN
     RETURN FALSE;
   END IF;
-  -- Iterate through each end_date_time in the jsonb array
-  FOR end_date_time IN
-  SELECT
-    (jsonb_array_elements(ad_sets_all_end_date_times) #>> '{}')::timestamp WITHOUT time zone LOOP
-      -- If any date is not before now, return false
-      IF end_date_time >= current_timestamp_val THEN
-        RETURN FALSE;
-      END IF;
-    END LOOP;
-  -- All dates are before now
+  -- Iterate through each end date in the array
+  FOREACH end_date_time IN ARRAY ad_sets_all_end_date_times LOOP
+    -- Check if the end date is before now
+    IF end_date_time >= current_timestamp_val THEN
+      RETURN FALSE;
+    END IF;
+  END LOOP;
+  -- All end dates are before now
   RETURN TRUE;
 END;
 $$
@@ -223,13 +213,13 @@ END;
 $$
 LANGUAGE plpgsql;
 
-CREATE FUNCTION get_campaign_status(p_ad_sets_total_count int, p_ad_sets_approved_count int, p_ad_sets_pending_approval_count int, p_ad_sets_completed_count int, p_ad_sets_active_start_end_date_times jsonb, p_ad_sets_all_end_date_times jsonb)
+CREATE FUNCTION get_campaign_status(p_ad_sets_total_count int, p_ad_sets_approved_count int, p_ad_sets_pending_approval_count int, p_ad_sets_completed_count int, p_ad_sets_active_start_end_ranges tsrange[], p_ad_sets_all_end_date_times timestamp without time zone[])
   RETURNS text
   AS $$
 BEGIN
   RETURN CASE WHEN p_ad_sets_total_count = 0 THEN
     'PENDING_APPROVAL'
-  WHEN count_active_ad_sets(p_ad_sets_active_start_end_date_times) > 0 THEN
+  WHEN count_active_ad_sets(p_ad_sets_active_start_end_ranges) > 0 THEN
     'ACTIVE'
   WHEN has_one_distinct_ad_set_status(p_ad_sets_approved_count, p_ad_sets_pending_approval_count, p_ad_sets_completed_count) = TRUE
     AND all_end_dates_before_now(p_ad_sets_all_end_date_times) THEN
@@ -245,7 +235,8 @@ LANGUAGE plpgsql;
 
 SELECT
   *,
-  get_campaign_status(ad_sets_total_count, ad_sets_approved_count, ad_sets_pending_approval_count, ad_sets_completed_count, ad_sets_active_start_end_date_times, ad_sets_all_end_date_times) AS derived_status
+  count_active_ad_sets(ad_sets_active_start_end_ranges) AS active_ad_sets_count,
+  get_campaign_status(ad_sets_total_count, ad_sets_approved_count, ad_sets_pending_approval_count, ad_sets_completed_count, ad_sets_active_start_end_ranges, ad_sets_all_end_date_times) AS derived_status
 FROM
   campaign;
 
