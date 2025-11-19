@@ -43,7 +43,7 @@ BEGIN
     v_campaign_id_new := NEW.campaign_id;
   ELSIF (TG_OP = 'UPDATE') THEN
     -- On UPDATE, check if the status or campaign link changed
-    IF OLD.review_status = NEW.review_status AND OLD.campaign_id = NEW.campaign_id AND OLD.current_budget_history_id = NEW.current_budget_history_id THEN
+    IF OLD.review_status = NEW.review_status AND OLD.campaign_id = NEW.campaign_id AND OLD.current_budget_history_id = NEW.current_budget_history_id AND OLD.is_paused = NEW.is_paused AND OLD.start_date_time = NEW.start_date_time AND OLD.end_date_time = NEW.end_date_time THEN
       -- Nothing we care about changed, so exit
       RETURN NEW;
     END IF;
@@ -232,6 +232,39 @@ BEGIN
 END;
 $$
 LANGUAGE plpgsql;
+
+UPDATE
+  campaign c
+SET
+  ad_sets_total_count = COALESCE(agg.total_count, 0),
+  ad_sets_approved_count = COALESCE(agg.approved_count, 0),
+  ad_sets_pending_approval_count = COALESCE(agg.pending_approval_count, 0),
+  ad_sets_completed_count = COALESCE(agg.completed_count, 0),
+  ad_sets_active_start_end_ranges = COALESCE(agg.active_start_end_date_times, ARRAY[]::tsrange[]),
+  ad_sets_all_end_date_times = COALESCE(agg.all_end_date_times, ARRAY[]::timestamp WITHOUT time zone[]),
+  ad_sets_is_paused_count = COALESCE(agg.is_paused_count, 0)
+FROM (
+  SELECT
+    a.campaign_id,
+    COUNT(*) AS total_count,
+    COUNT(*) FILTER (WHERE a.review_status = 'APPROVED') AS approved_count,
+    COUNT(*) FILTER (WHERE a.review_status = 'PENDING_APPROVAL') AS pending_approval_count,
+    COUNT(*) FILTER (WHERE a.review_status = 'COMPLETED') AS completed_count,
+    COALESCE(array_agg(tsrange(a.start_date_time, a.end_date_time, '()')) FILTER (WHERE a.start_date_time IS NOT NULL
+        AND ((a.end_date_time IS NOT NULL)
+      OR (a.end_date_time IS NULL
+      AND bh.budget_type = 'DAILY'))
+  AND a.review_status IN ('READY', 'APPROVED')), ARRAY[]::tsrange[]) AS active_start_end_date_times,
+    COALESCE(array_agg(a.end_date_time) FILTER (WHERE a.end_date_time IS NOT NULL
+        AND a.review_status <> 'ARCHIVED'), ARRAY[]::timestamp WITHOUT time zone[]) AS all_end_date_times,
+    COUNT(*) FILTER (WHERE a.is_paused = TRUE) AS is_paused_count
+  FROM
+    ad_set a
+  LEFT JOIN budget_history bh ON a.current_budget_history_id = bh.id
+GROUP BY
+  a.campaign_id) agg
+WHERE
+  c.id = agg.campaign_id;
 
 SELECT
   c.*,
