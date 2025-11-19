@@ -213,18 +213,18 @@ END;
 $$
 LANGUAGE plpgsql;
 
-CREATE FUNCTION get_campaign_status(p_ad_sets_total_count int, p_ad_sets_approved_count int, p_ad_sets_pending_approval_count int, p_ad_sets_completed_count int, p_ad_sets_active_start_end_ranges tsrange[], p_ad_sets_all_end_date_times timestamp without time zone[])
+CREATE FUNCTION get_campaign_status(p_campaign campaign)
   RETURNS text
   AS $$
 BEGIN
-  RETURN CASE WHEN p_ad_sets_total_count = 0 THEN
+  RETURN CASE WHEN p_campaign.ad_sets_total_count = 0 THEN
     'PENDING_APPROVAL'
-  WHEN count_active_ad_sets(p_ad_sets_active_start_end_ranges) > 0 THEN
+  WHEN count_active_ad_sets(p_campaign.ad_sets_active_start_end_ranges) > 0 THEN
     'ACTIVE'
-  WHEN has_one_distinct_ad_set_status(p_ad_sets_approved_count, p_ad_sets_pending_approval_count, p_ad_sets_completed_count) = TRUE
-    AND all_end_dates_before_now(p_ad_sets_all_end_date_times) THEN
+  WHEN has_one_distinct_ad_set_status(p_campaign.ad_sets_approved_count, p_campaign.ad_sets_pending_approval_count, p_campaign.ad_sets_completed_count) = TRUE
+    AND all_end_dates_before_now(p_campaign.ad_sets_all_end_date_times) THEN
     'COMPLETED'
-  WHEN p_ad_sets_pending_approval_count > 0 THEN
+  WHEN p_campaign.ad_sets_pending_approval_count > 0 THEN
     'PENDING_APPROVAL'
   ELSE
     'UNKNOWN'
@@ -234,9 +234,9 @@ $$
 LANGUAGE plpgsql;
 
 SELECT
-  *,
-  count_active_ad_sets(ad_sets_active_start_end_ranges) AS active_ad_sets_count,
-  get_campaign_status(ad_sets_total_count, ad_sets_approved_count, ad_sets_pending_approval_count, ad_sets_completed_count, ad_sets_active_start_end_ranges, ad_sets_all_end_date_times) AS derived_status
+  c.*,
+  count_active_ad_sets(c.ad_sets_active_start_end_ranges) AS active_ad_sets_count,
+  get_campaign_status(c) AS derived_status
 FROM
-  campaign;
+  campaign c;
 
