@@ -43,7 +43,7 @@ BEGIN
     v_campaign_id_new := NEW.campaign_id;
   ELSIF (TG_OP = 'UPDATE') THEN
     -- On UPDATE, check if the status or campaign link changed
-    IF OLD.review_status = NEW.review_status AND OLD.campaign_id = NEW.campaign_id AND OLD.current_budget_history_id = NEW.current_budget_history_id AND OLD.is_paused = NEW.is_paused AND OLD.start_date_time = NEW.start_date_time AND OLD.end_date_time = NEW.end_date_time THEN
+    IF OLD.review_status IS NOT DISTINCT FROM NEW.review_status AND OLD.campaign_id IS NOT DISTINCT FROM NEW.campaign_id AND OLD.current_budget_history_id IS NOT DISTINCT FROM NEW.current_budget_history_id AND OLD.is_paused IS NOT DISTINCT FROM NEW.is_paused AND OLD.start_date_time IS NOT DISTINCT FROM NEW.start_date_time AND OLD.end_date_time IS NOT DISTINCT FROM NEW.end_date_time THEN
       -- Nothing we care about changed, so exit
       RETURN NEW;
     END IF;
